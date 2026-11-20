@@ -1,8 +1,18 @@
-
 import os
+import sys
 import streamlit as st
-import requests
 from datetime import datetime
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from app.classifier import classify_question_details
+from app.router import route_question
+from app.model_handler import generate_response
 
 # --------------------------------------------------
 # PAGE CONFIGURATION
@@ -15,7 +25,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-API_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+
+# --------------------------------------------------
+# API KEY CONFIGURATION
+# --------------------------------------------------
+
+try:
+    cloud_api_key = st.secrets.get("GROQ_API_KEY", "")
+except Exception:
+    cloud_api_key = ""
+
+if cloud_api_key:
+    os.environ["GROQ_API_KEY"] = cloud_api_key
 
 # --------------------------------------------------
 # SESSION STATE
@@ -132,22 +153,18 @@ with st.sidebar:
 
     st.markdown("### 🧠 AI System")
 
-    if st.session_state.api_status is True:
-        st.success("API Connected")
-    elif st.session_state.api_status is False:
-        st.error("API Disconnected")
+    if os.getenv("GROQ_API_KEY"):
+        st.success("AI Configuration Ready")
     else:
-        st.info("Connection not checked")
+        st.warning("Groq API key needs to be configured")
 
-    if st.button("⚡ Check API Connection", use_container_width=True):
-        try:
-            response = requests.get(API_URL, timeout=5)
-            response.raise_for_status()
+    if st.button("⚡ Check AI Configuration", use_container_width=True):
+        if os.getenv("GROQ_API_KEY"):
             st.session_state.api_status = True
-            st.success("FastAPI is running!")
-        except requests.RequestException:
+            st.success("AI key detected. Ready to process questions!")
+        else:
             st.session_state.api_status = False
-            st.error("Unable to connect. Start the backend.")
+            st.error("Add your GROQ_API_KEY in Streamlit Secrets.")
 
     st.divider()
 
@@ -276,115 +293,102 @@ elif page == "💬 AI Playground":
                     "🧠 Analyzing your question and selecting the best AI model..."
                 ):
 
-                    response = requests.post(
-                        f"{API_URL}/ask",
-                        json={"question": question.strip()},
-                        timeout=180
+                    classification = classify_question_details(
+                        question.strip()
                     )
 
-                if response.status_code == 200:
-
-                    result = response.json()
-
-                    st.session_state.api_status = True
-
-                    st.success("✨ Your AI response is ready!")
-
-                    st.divider()
-
-                    st.markdown("### 📊 Question Analysis")
-
-                    col1, col2, col3 = st.columns(3)
-
-                    with col1:
-                        st.metric(
-                            "Complexity",
-                            result.get("complexity", "N/A").upper()
-                        )
-
-                    with col2:
-                        st.metric(
-                            "Complexity Score",
-                            result.get("complexity_score", "N/A")
-                        )
-
-                    with col3:
-                        st.metric(
-                            "Confidence",
-                            f'{result.get("confidence", 0)}%'
-                        )
-
-                    st.markdown("### ⚡ Selected AI Model")
-
-                    st.code(
-                        result.get("selected_model", "Not available"),
-                        language="text"
+                    routing_info = route_question(
+                        question.strip()
                     )
 
-                    st.markdown("### 🔍 Classification Reason")
-
-                    st.info(
-                        result.get("reason", "No reason provided.")
+                    answer = generate_response(
+                        question.strip(),
+                        routing_info["selected_model"]
                     )
 
-                    st.markdown("### 💡 AI Generated Answer")
+                    result = {
+                        "complexity": classification["complexity"],
+                        "complexity_score": classification["score"],
+                        "confidence": classification["confidence"],
+                        "reason": classification["reason"],
+                        "selected_model": routing_info["selected_model"],
+                        "answer": answer
+                    }
 
-                    answer = result.get(
-                        "answer",
-                        "No answer was returned."
+                st.session_state.api_status = True
+
+                st.success("✨ Your AI response is ready!")
+
+                st.divider()
+
+                st.markdown("### 📊 Question Analysis")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "Complexity",
+                        result.get("complexity", "N/A").upper()
                     )
 
-                    st.markdown(
-                        '<div class="response-box">',
-                        unsafe_allow_html=True
+                with col2:
+                    st.metric(
+                        "Complexity Score",
+                        result.get("complexity_score", "N/A")
                     )
 
-                    st.markdown(answer)
-
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-                    # Save result in session history
-                    st.session_state.history.append({
-                        "question": question.strip(),
-                        "complexity": result.get("complexity", "N/A"),
-                        "score": result.get("complexity_score", 0),
-                        "confidence": result.get("confidence", 0),
-                        "model": result.get("selected_model", "N/A"),
-                        "reason": result.get("reason", ""),
-                        "answer": answer,
-                        "time": datetime.now().strftime(
-                            "%d-%m-%Y %I:%M %p"
-                        )
-                    })
-
-                else:
-                    st.error(
-                        f"API Error: {response.status_code}"
+                with col3:
+                    st.metric(
+                        "Confidence",
+                        f'{result.get("confidence", 0)}%'
                     )
 
-                    try:
-                        st.write(response.json())
-                    except ValueError:
-                        st.write(response.text)
+                st.markdown("### ⚡ Selected AI Model")
 
-            except requests.exceptions.Timeout:
-                st.error(
-                    "The request took too long. Please try again."
+                st.code(
+                    result.get("selected_model", "Not available"),
+                    language="text"
                 )
 
-            except requests.exceptions.ConnectionError:
+                st.markdown("### 🔍 Classification Reason")
+
+                st.info(
+                    result.get("reason", "No reason provided.")
+                )
+
+                st.markdown("### 💡 AI Generated Answer")
+
+                answer = result.get(
+                    "answer",
+                    "No answer was returned."
+                )
+
+                st.markdown(
+                    '<div class="response-box">',
+                    unsafe_allow_html=True
+                )
+
+                st.markdown(answer)
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                # Save result in session history
+                st.session_state.history.append({
+                    "question": question.strip(),
+                    "complexity": result.get("complexity", "N/A"),
+                    "score": result.get("complexity_score", 0),
+                    "confidence": result.get("confidence", 0),
+                    "model": result.get("selected_model", "N/A"),
+                    "reason": result.get("reason", ""),
+                    "answer": answer,
+                    "time": datetime.now().strftime(
+                        "%d-%m-%Y %I:%M %p"
+                    )
+                })
+
+            except Exception as error:
                 st.session_state.api_status = False
-
-                st.error(
-                    "Cannot connect to FastAPI. "
-                    "Please start your backend server first."
-                )
-
-            except requests.RequestException as error:
-                st.error(f"Request failed: {error}")
-
-            except ValueError:
-                st.error("The API returned an invalid response.")
+                st.error(f"Unable to generate a response: {error}")
 
 # --------------------------------------------------
 # REQUEST HISTORY
@@ -581,7 +585,7 @@ st.markdown(
         <br>
         Think Smart. Route Smarter. ✨
         <br>
-        Built with Python | Streamlit | FastAPI | Groq
+        Built with Python | Streamlit | Groq
     </div>
     """,
     unsafe_allow_html=True
